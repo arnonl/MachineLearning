@@ -1,0 +1,215 @@
+---
+title: "Practical Machine-Learning: Final Project"
+author: "Arnon D. Lieber"
+date: "July 2, 2016"
+output: html_document
+---
+
+
+**This code was written as part of the final project in the Practical Machine-learning course by Johns-hopkins University (in Coursera)**
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+## Background
+
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. Here we use the data collected from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. The goal of this assinment is to identify the way they performed the barbell lift.
+
+```{r exploratory}
+setwd(dir = "/Users/arnon/Documents/Arnon/Data scientist/Machine learning/Assignment4")
+# rm(list=ls())
+
+# Downloads files
+#=================
+# destFolder <- "Users/arnon/Documents/Arnon/Data scientist/Machine learning/Assignment4/"
+# download.file(url = "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv", destfile = destFolder, method = "curl")
+# download.file(url = "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv", destfile = destFolder, method = "curl")
+# Reads files
+
+allData <- read.csv("/Users/arnon/Documents/Arnon/Data scientist/Machine learning/Assignment4/pml-training.csv")
+test  <- read.csv("/Users/arnon/Documents/Arnon/Data scientist/Machine learning/Assignment4/pml-testing.csv")
+
+# Shows the variables that the test dataset is missing
+setdiff(colnames(allData),colnames(test))
+
+# str(allData)
+dim(allData)
+```
+
+```{r cleaning_data}
+library(caret)
+
+# Set the seed
+set.seed(646)
+
+# Partition data set for training and validation
+useForTrain <- createDataPartition(allData$classe, p = .6, list = F)
+
+predVar <- !(colnames(allData) %in% c("classe"))
+trainingPred <- allData[useForTrain,predVar]
+training <- allData[useForTrain,]
+testingPred  <- allData[-useForTrain,predVar]
+testing  <- allData[-useForTrain,]
+
+# Assess and remove the variables that have low variability
+nzv <- nearZeroVar(trainingPred)
+trainingPred <- trainingPred[,-nzv]
+
+# The X variable tell nothing about the system, let's remove it
+trainingPred <- trainingPred[,-1]
+
+# Remove variables with mainly NA (above 80%)
+notNA <- apply(trainingPred, 2, function(x) {!sum(is.na(x))/dim(trainingPred)[1] > .8})
+trainingPred <- trainingPred[,notNA]
+
+rmColIndx <- grep("timestamp|X|user_name|new_window", names(trainingPred))
+trainingPred <- trainingPred[, -rmColIndx]
+
+# Define the columns of the training and testing sets
+training <- training[,c("classe",colnames(trainingPred))]
+testing  <- testing[,c("classe",colnames(trainingPred))]
+
+# Confirms that the classe defines as a factor
+class(allData$classe)
+
+# Set the tesing set to have the same predictors as to the training
+testingPred <- testingPred[,colnames(testingPred) %in% colnames(trainingPred)]
+
+# Cross Validation building
+# folds <- createFolds(y = training$classe, k = 5, list = TRUE, returnTrain = TRUE)
+
+
+```
+
+
+## Preproccessing
+
+Here I aim to reduce the dimensionality using "principle components" and thereby also accelerating computation time
+
+```{r Preproccessing}
+
+# Reducing the complexity of the predictors by generating "principle components" 
+pcaObj <- preProcess(x = trainingPred, method = c("center", "scale", "pca"), thresh = 0.9)
+trainPred.pre <- predict(pcaObj, trainingPred)
+testPred.pre <- predict(pcaObj, testingPred)
+print(pcaObj)
+```
+
+
+## Modeling
+
+#### Random forest (with PCA) 
+
+```{r model_building_rf1, cache=TRUE}
+
+# Random forest
+suppressMessages(require(randomForest))
+
+# Combining PCs with Classe
+trainPCs <- data.frame(classe = training[,"classe"], trainPred.pre)
+
+# Running random forest on the PCs elements
+# mod_rf <- train(classe ~ ., data = train.pre, method="rf") #trControl=train_control
+mod_rf1 <- randomForest(classe ~ ., data = trainPCs)
+summary(mod_rf1)
+mod_rf1
+
+# Defining data.frame with the PCs and the classe factor
+testPCs <- data.frame(classe = testing$classe, testPred.pre)
+
+# Test the model on the test data 
+test_rf1_pred <- predict(mod_rf1, testPCs)
+confMat_rf1 <- confusionMatrix(test_rf1_pred, testing$classe)
+plot(confMat_rf1$table, col = confMat_rf1$byClass, 
+     main = "RF Confusion Matrix (using PCA)")
+```
+
+**Figure1**: Classification using the random forest approch using PC as predictors. Graphical representation of the Confusion matrix showing the level of correct classification and errors for each category.  
+
+#### Random forest (without PCA)
+
+```{r model_building_rf2, cache=TRUE}
+
+# Random forest
+suppressMessages(require(randomForest))
+
+# Defines train control with 5 iterations of cross validation 
+train_control <- trainControl(method="cv", number=5)
+# getModelInfo(model = "rf")
+
+# Running random forest on the refined data
+mod_rf2 <- train(classe ~ ., data = training, method="rf", trControl=train_control)
+save(file = "model.rf.cv", "mod_rf2")
+
+summary(mod_rf2)
+mod_rf2$finalModel
+mod_rf2
+
+# Test the model on the test data 
+test_rf2_pred <- predict(mod_rf2, testingPred)
+confMat_rf2 <- confusionMatrix(test_rf2_pred, testing$classe)
+plot(confMat_rf2$table, col = confMat_rf2$byClass, main = "RF Confusion Matrix")
+```
+
+**Figure2**: Classification using the random forest approch using PC as predictors. Graphical representation of the Confusion matrix showing the level of correct classification and errors for each category.  
+  
+  
+#### Prediction with decision trees
+
+```{r model_building_tree, cache=TRUE}
+# Prediction with decision trees
+suppressMessages(require(rpart))
+
+mod_rpart <- rpart(classe ~ ., data=training, method="class")
+test_rpart_pred <- predict(mod_rpart, testingPred, type = "class")
+confusionMatrix(test_rpart_pred, testing$classe)
+
+library(rpart.plot)
+library(rattle)
+fancyRpartPlot(mod_rpart)
+
+```
+
+**Figure3**: Graphical representation of decision tree. The graph shows the partitioning to different classes, moving from the most influential predictors down with their importance.
+  
+  
+#### Conclusions
+
+The best prediction was achieved using the 53 predictors of the tidy training set, appling random forest (without preior PCA)
+
+Here is the prediction of exercise class for the 20 entries in the test dataset:
+
+```{r test_data_validation}
+
+# Sets the test set to have the same predictors as to the training set
+test <- test[,colnames(test) %in% colnames(trainingPred)]
+
+# Apply the machine learning model to the test data set, and get the predictions
+predictionOut <- predict(mod_rf2, test)
+as.character(predictionOut)
+
+```
+  
+  
+#### Out of sample error  
+  
+  
+Here we want to estimate the level of error that the model does not fit to the testing set
+
+```{r OSE}
+# Accuracy of the predicted model
+outOfSampleAccuracy <- sum(test_rf2_pred == testing$classe)/length(test_rf2_pred)
+
+# Out Of Sample Error
+paste0("Out of sample error: ", round((1-outOfSampleAccuracy)*100, digits = 2),"%")
+
+```
+
+
+```{r plotting, echo=FALSE}
+
+```
+
+
